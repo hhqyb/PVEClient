@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+src-tauri/target/
+src-tauri/gen/
+
+# 本地工具偏好，与项目构建无关
+.commandcode/
+
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.log
