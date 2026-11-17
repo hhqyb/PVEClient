@@ -5,16 +5,20 @@ import { api, ConsoleError } from "../api/bridge";
 import type { Guest } from "../api/types";
 import ConsoleToolbar from "../components/ConsoleToolbar";
 import SpicePanel from "../components/SpicePanel";
+import SpiceStatusBar from "../components/SpiceStatusBar";
 import VncViewport from "../components/VncViewport";
 import { useSession } from "../store/session";
 
 export default function ConsolePage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { console: handle, openConsole, closeConsole, guests } = useSession();
+  const { console: handle, openConsole, closeConsole, guests, settings, updateSettings } =
+    useSession();
 
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
+
+  const usbEnabled = settings?.spice_usb_redirect ?? true;
 
   // 从列表页带过来；直接刷新页面时退回 store 里找
   const initialGuest = (location.state as { guest?: Guest } | null)?.guest;
@@ -62,6 +66,43 @@ export default function ConsolePage() {
     await closeConsole().catch(() => undefined);
     navigate("/guests");
   }, [closeConsole, navigate]);
+
+  /**
+   * 切换 USB 透传。
+   *
+   * remote-viewer 只在启动时读取 `enable-usbredir`，无法运行时生效，
+   * 因此这里先改设置，再重开会话让新配置真正落地。
+   */
+  const toggleUsb = useCallback(async () => {
+    if (!guest || !settings) return;
+    setError(null);
+    try {
+      await updateSettings({ ...settings, spice_usb_redirect: !usbEnabled });
+      await closeConsole();
+      await openConsole(guest, "spice");
+    } catch (e) {
+      setError((e as ConsoleError).message);
+    }
+  }, [guest, settings, usbEnabled, updateSettings, closeConsole, openConsole]);
+
+  /** 在「窗口 / 全屏」之间切换，同样需要重开查看器。 */
+  const toggleFullscreen = useCallback(async () => {
+    if (!guest || !settings) return;
+    setError(null);
+    try {
+      const nextFullscreen = !settings.spice_fullscreen;
+      // 全屏与 kiosk 互斥：kiosk 没有退出热键，切换时一律关掉
+      await updateSettings({
+        ...settings,
+        spice_fullscreen: nextFullscreen,
+        spice_kiosk: false,
+      });
+      await closeConsole();
+      await openConsole(guest, "spice");
+    } catch (e) {
+      setError((e as ConsoleError).message);
+    }
+  }, [guest, settings, updateSettings, closeConsole, openConsole]);
 
   // 确保离开控制台时回收外部进程（避免 remote-viewer 变僵尸、PVE 侧会话堆积）：
   // - 路由跳转：goBack / switchProtocol 已显式关闭
@@ -151,13 +192,21 @@ export default function ConsolePage() {
       )}
 
       {handle?.protocol === "spice" && (
-        <SpicePanel
-          consoleId={handle.id}
-          viewer={handle.viewer}
-          reason={handle.reason}
-          onReopen={() => void reopen()}
-          onSwitchToVnc={() => void switchProtocol("novnc")}
-        />
+        <>
+          <SpiceStatusBar
+            usbEnabled={usbEnabled}
+            onToggleUsb={() => void toggleUsb()}
+            onToggleFullscreen={() => void toggleFullscreen()}
+            onReopen={() => void reopen()}
+          />
+          <SpicePanel
+            consoleId={handle.id}
+            viewer={handle.viewer}
+            reason={handle.reason}
+            onReopen={() => void reopen()}
+            onSwitchToVnc={() => void switchProtocol("novnc")}
+          />
+        </>
       )}
 
       {handle?.protocol === "vnc" && (

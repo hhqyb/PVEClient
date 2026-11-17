@@ -8,6 +8,7 @@ import type {
   ServerProbe,
   SessionInfo,
   Settings,
+  SpiceStatus,
   TaskStatus,
   ViewerState,
 } from "./types";
@@ -92,6 +93,8 @@ export const api = {
   }) => call<ConsoleHandle>("open_console", params),
 
   closeConsole: (id: string) => call<void>("close_console", { id }),
+
+  spiceStatus: () => call<SpiceStatus | null>("spice_status"),
 
   viewerStatus: (id: string) => call<ViewerState | null>("viewer_status", { id }),
 

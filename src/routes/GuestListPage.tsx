@@ -43,6 +43,9 @@ export default function GuestListPage() {
             action: "start",
           });
           await waitForTask(guest.node, upid);
+          // 任务 OK 只代表 PVE 接受了操作；用 status/current 探测真正的运行状态，
+          // 因为列表数据源（cluster/resources）有缓存延迟，否则会误报「未运行」
+          await waitUntilRunning(guest.node, guest.kind, guest.vmid);
           setNotice(null);
         }
         await openConsole(guest);
@@ -51,9 +54,12 @@ export default function GuestListPage() {
         setNotice(null);
         const err = e as ConsoleError;
         setActionError(err.message);
+      } finally {
+        // 无论成功与否都同步一次列表，让界面状态与 PVE 真实状态一致
+        await refreshGuests().catch(() => undefined);
       }
     },
-    [navigate, openConsole],
+    [navigate, openConsole, refreshGuests],
   );
 
   const handlePower = useCallback(
@@ -253,4 +259,31 @@ async function waitForTask(
     await new Promise((r) => setTimeout(r, 1000));
   }
   throw new ConsoleError({ code: "TASK_TIMEOUT", message: "等待 PVE 任务超时" });
+}
+
+/**
+ * 等待虚拟机真正进入 running。
+ *
+ * `qmstart` 任务返回 OK 时，虚拟机可能还在初始化，而列表用的
+ * `/cluster/resources` 更是集群状态缓存，会比真实状态晚一拍。
+ * 这里直接用 `status/current` 查询真实状态，避免「刚开机却判定未运行」。
+ */
+async function waitUntilRunning(
+  node: string,
+  kind: string,
+  vmid: number,
+  timeoutMs = 90_000,
+): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const running = await api
+      .guestIsRunning(vmid, node, kind)
+      .catch(() => false);
+    if (running) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new ConsoleError({
+    code: "GUEST_NOT_RUNNING",
+    message: "虚拟机启动超时，请稍后在列表中刷新确认状态",
+  });
 }

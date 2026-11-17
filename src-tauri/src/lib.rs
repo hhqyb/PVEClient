@@ -1,4 +1,4 @@
-mod console;
+pub mod console;
 mod error;
 mod secrets;
 mod settings;
@@ -147,9 +147,11 @@ async fn login(
         .await
         .ok_or(AppError::NotAuthenticated)?;
 
-    // 记住密码：只进钥匙串；不记住则清掉旧条目
+    // 记住密码：只进钥匙串；不记住则清掉旧条目。
+    // 键用与 load_saved_password 完全相同的来源（settings.server），保证读写一致。
     let remember = remember.unwrap_or(settings.remember_password);
-    let account = format!("{}@{}@{}", info.username, info.host, info.realm);
+    let server = client.base_url().trim_end_matches("/api2/json").to_string();
+    let account = secrets::account_key(&server, &info.username, &info.realm);
     if remember {
         if let Err(e) = secrets::save_password(&account, &password) {
             tracing::warn!("保存密码到钥匙串失败：{e}");
@@ -160,7 +162,7 @@ async fn login(
 
     // 持久化非敏感信息
     let mut next = settings;
-    next.server = client.base_url().trim_end_matches("/api2/json").to_string();
+    next.server = server;
     next.username = info.username.clone();
     next.realm = info.realm.clone();
     next.allow_invalid_certs = allow_invalid_certs;
@@ -195,10 +197,8 @@ async fn load_saved_password(state: State<'_, AppState>) -> Result<Option<String
     if !settings.remember_password {
         return Ok(None);
     }
-    let account = format!(
-        "{}@{}@{}",
-        settings.username, settings.server, settings.realm
-    );
+    // 必须与 login 保存时用同一个键，否则读不到（该 bug 曾让「记住密码」全部失效）
+    let account = secrets::account_key(&settings.server, &settings.username, &settings.realm);
     secrets::load_password(&account)
 }
 
@@ -257,17 +257,32 @@ async fn open_console(
 
     // 用最新配置重新判定，避免列表缓存过期（用户可能刚改了 vga）
     let mut guests = pve::resources::list_guests(&client).await?;
-    let guest = guests
+    let mut guest = guests
         .drain(..)
         .find(|g| g.vmid == vmid && g.node == node && g.kind == kind)
         .ok_or_else(|| {
             AppError::Forbidden(format!("未找到 VM {vmid}，或当前账号没有访问权限"))
         })?;
 
+    // `/cluster/resources` 的 status 是集群状态缓存，开机任务刚结束时它可能仍报
+    // stopped（实测：任务 OK 后 status/current 已是 running，而 resources 还是旧值）。
+    // 直接以 status/current 为准，否则「开机并连接」必然误报「虚拟机未运行」。
+    if let Ok(running) =
+        pve::console::is_running(&client, &guest.node, &guest.kind, guest.vmid).await
+    {
+        guest.status = if running { "running" } else { "stopped" }.to_string();
+    }
+
     let forced = match force_protocol.as_deref() {
         Some("spice") => Some(Protocol::Spice),
         Some("novnc") | Some("vnc") => Some(Protocol::Vnc),
         _ => settings.protocol_pref(),
+    };
+
+    let options = console::SpiceOptions {
+        kiosk: settings.spice_kiosk,
+        fullscreen: settings.spice_fullscreen,
+        usb_redirect: settings.spice_usb_redirect,
     };
 
     state
@@ -277,10 +292,18 @@ async fn open_console(
             &guest,
             forced,
             settings.spice_proxy_override.as_deref(),
-            settings.spice_kiosk,
+            options,
             settings.viewer().as_ref(),
         )
         .await
+}
+
+/// SPICE 状态栏数据：当前会话信息与查看器存活状态。
+#[tauri::command]
+async fn spice_status(
+    state: State<'_, AppState>,
+) -> Result<Option<console::SpiceStatus>, AppError> {
+    Ok(state.consoles.spice_status().await)
 }
 
 #[tauri::command]
@@ -368,6 +391,7 @@ pub fn run() {
             guest_is_running,
             open_console,
             close_console,
+            spice_status,
             viewer_status,
             detect_viewer,
             get_settings,

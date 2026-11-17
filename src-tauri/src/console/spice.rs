@@ -129,16 +129,19 @@ fn windows_registry_lookup() -> Option<PathBuf> {
 ///
 /// 用 `-` 让 remote-viewer 从标准输入读配置，**密码不落盘**；
 /// `spiceproxy` 的返回字段全部透传，避免漏掉 `host-subject` 导致 TLS 校验失败。
+///
+/// `fullscreen=false` 时以普通窗口打开，便于用户同时看状态栏与其它窗口。
 pub async fn launch(
     viewer: &PathBuf,
     vv: &str,
     kiosk: bool,
+    fullscreen: bool,
 ) -> AppResult<Child> {
     let mut cmd = Command::new(viewer);
 
     if kiosk {
         cmd.arg("--kiosk").arg("--kiosk-quit").arg("on-disconnect");
-    } else {
+    } else if fullscreen {
         cmd.arg("--full-screen");
     }
     cmd.arg("-");

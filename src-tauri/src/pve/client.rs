@@ -336,10 +336,15 @@ impl PveClient {
 
     /// 登录：POST /access/ticket
     ///
-    /// 用户名必须与 realm 字段分开传：PVE 会把 `username` 原样按 `user@realm` 解析，
-    /// 若同时再带 `realm=pam`，实际认证的就是 `root@pam@pam`，结果一定是 401。
-    /// 而界面上「记住的账号」和「realm 下拉框」都可能各自带着 realm，
-    /// 因此这里统一剥掉用户名里的 realm 后缀，只由 `realm` 参数决定认证域。
+    /// PVE 的实际行为（实测）：
+    /// - `username=root` 且不带 realm → 401
+    /// - `username=root@pam` 且不带 realm → 200
+    /// - `username=root` + `realm=pam` → 200
+    /// - `username=root@pam` + `realm=pam` → 401（被拼成 root@pam@pam）
+    ///
+    /// 也就是说认证域必须**恰好出现一次**：要么写在用户名里，要么单独传 realm。
+    /// 这里统一取「用户名里的 realm」与「显式 realm」，取到的那一个只发一次，
+    /// 并保证 session.username 始终是完整的 `user@realm`（renew 依赖它）。
     pub async fn login(
         &self,
         username: &str,
@@ -348,17 +353,27 @@ impl PveClient {
         otp: Option<&str>,
     ) -> AppResult<Session> {
         let (user_part, realm_from_user) = split_user_realm(username);
-        // 显式传入的 realm 优先；界面没选认证域时，退回用户名自带的那一个
-        let realm = if realm.trim().is_empty() {
-            realm_from_user.unwrap_or_default()
+        // 下拉框是用户的显式选择，优先于用户名里可能残留的 @realm 后缀；
+        // 只有在界面没有认证域可选时才退回用户名自带的那一个。
+        let picked = realm.trim();
+        let realm = if !picked.is_empty() {
+            picked.to_string()
         } else {
-            realm.trim().to_string()
+            realm_from_user.unwrap_or_default()
         };
 
-        let mut form = vec![("username".to_string(), user_part.clone())];
-        if !realm.is_empty() {
-            form.push(("realm".to_string(), realm.clone()));
+        if user_part.is_empty() {
+            return Err(AppError::InvalidCredentials);
         }
+        // 没有认证域时 PVE 一定拒绝，直接给出可执行的提示，不浪费一次往返
+        if realm.is_empty() {
+            return Err(AppError::InvalidRealm(
+                "请选择认证域（如 pam / pve / 你的 AD 域）".into(),
+            ));
+        }
+
+        let mut form = vec![("username".to_string(), user_part.clone())];
+        form.push(("realm".to_string(), realm.clone()));
         form.push(("password".to_string(), password.to_string()));
         if let Some(code) = otp {
             form.push(("otp".to_string(), code.to_string()));
@@ -403,14 +418,10 @@ impl PveClient {
             ticket: parsed.ticket,
             csrf: parsed.csrf,
             // 始终存成完整的 user@realm：renew() 依赖它拆回用户名与认证域
-            username: parsed.username.unwrap_or_else(|| {
-                if realm.is_empty() {
-                    user_part
-                } else {
-                    format!("{user_part}@{realm}")
-                }
-            }),
-            realm: realm.to_string(),
+            username: parsed
+                .username
+                .unwrap_or_else(|| format!("{user_part}@{realm}")),
+            realm: realm.clone(),
             host: self.host.clone(),
             expires_at: now_secs() + TICKET_LIFETIME_SECS,
         };

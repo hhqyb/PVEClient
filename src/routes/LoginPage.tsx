@@ -31,14 +31,22 @@ export default function LoginPage() {
   // 用已保存的设置预填，但绝不预填密码（密码只从钥匙串按需读取）
   useEffect(() => {
     if (!settings) return;
-    setServer((prev) => prev || settings.server);
-    // 用户名与认证域分开显示：保存的 username 可能已带 @realm，
-    // 直接填进输入框会让人以为要写全名，认证域另由下拉框决定
+    const server = settings.server;
+    const savedRealm = settings.realm;
+    // 用户名与认证域分开显示：保存的 username 带 @realm，输入框只放纯用户名，
+    // 认证域由下拉框决定（PVE 不接受裸用户名，两者都是必填）
     const [userOnly] = settings.username.split("@");
+    setServer((prev) => prev || server);
     setUsername((prev) => prev || userOnly);
-    setRealm((prev) => prev || settings.realm);
+    setRealm((prev) => prev || savedRealm);
     setRemember(settings.remember_password);
     setAllowInvalid(settings.allow_invalid_certs);
+
+    // 自动探活：认证域下拉框需要 realm 列表，否则用户面对空列表无从选择
+    if (server.trim()) {
+      void probe(server.trim(), settings.allow_invalid_certs, savedRealm);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
   useEffect(() => {
@@ -55,41 +63,50 @@ export default function LoginPage() {
     };
   }, [settings?.remember_password, settings?.username]);
 
+  async function probe(target: string, allowInvalidCerts: boolean, keepRealm?: string) {
+    setError(null);
+    setCertWarning(null);
+    setPhase("probing");
+    try {
+      const result = await api.probeServer(target, allowInvalidCerts);
+      setRealms(result.realms);
+      setVersion(result.version);
+      if (result.fingerprint_warning) {
+        setCertWarning(result.fingerprint_warning);
+      }
+
+      // 尽量保留用户/设置里已有的选择，其次选 PVE 标记的 default 域
+      setRealm((prev) => {
+        const wanted = keepRealm || prev;
+        if (wanted && result.realms.some((r) => r.realm === wanted)) {
+          return wanted;
+        }
+        const preferred = result.realms.find((r) => (r.default ?? 0) === 1);
+        if (preferred) return preferred.realm;
+        if (result.realms.length === 1) return result.realms[0].realm;
+        return wanted || "";
+      });
+
+      setPhase("ready");
+      setHint(
+        result.realms.length === 0
+          ? "该服务器没有可用的认证域，请先在 PVE 上配置 AD / LDAP realm"
+          : `已连接 Proxmox VE ${result.version}，共 ${result.realms.length} 个认证域`,
+      );
+    } catch (e) {
+      setPhase("idle");
+      setError(e as ConsoleError);
+    }
+  }
+
   async function handleProbe(e?: React.FormEvent) {
     e?.preventDefault();
     if (!server.trim()) {
       setError(new ConsoleError({ code: "INVALID_URL", message: "请填写服务器地址" }));
       return;
     }
-    setError(null);
     setHint("");
-    setCertWarning(null);
-    setPhase("probing");
-    try {
-      const probe = await api.probeServer(server.trim(), allowInvalid);
-      setRealms(probe.realms);
-      setVersion(probe.version);
-      if (probe.fingerprint_warning) {
-        setCertWarning(probe.fingerprint_warning);
-      }
-
-      // 优先选中 PVE 标记为 default 的域
-      const preferred = probe.realms.find((r) => (r.default ?? 0) === 1);
-      if (preferred) {
-        setRealm(preferred.realm);
-      } else if (probe.realms.length === 1) {
-        setRealm(probe.realms[0].realm);
-      }
-      setPhase("ready");
-      setHint(
-        probe.realms.length === 0
-          ? "该服务器没有可用的认证域，请先在 PVE 上配置 AD / LDAP realm"
-          : `已连接 Proxmox VE ${probe.version}，共 ${probe.realms.length} 个认证域`,
-      );
-    } catch (e) {
-      setPhase("idle");
-      setError(e as ConsoleError);
-    }
+    await probe(server.trim(), allowInvalid, realm);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -150,9 +167,11 @@ export default function LoginPage() {
           />
         </div>
 
-        {realms.length > 0 && (
-          <div className="field">
-            <label htmlFor="realm">认证域</label>
+        <div className="field">
+          <label htmlFor="realm">认证域</label>
+          {/* 认证域是 PVE 认证的必填项（PVE 不接受裸用户名），因此始终显示。
+              探测成功时用下拉框避免拼错；探测不到时退回文本框，保证仍能手动登录。 */}
+          {realms.length > 0 ? (
             <select
               id="realm"
               className="select"
@@ -167,8 +186,26 @@ export default function LoginPage() {
                 </option>
               ))}
             </select>
-          </div>
-        )}
+          ) : (
+            <input
+              id="realm"
+              className="input"
+              placeholder="pam"
+              value={realm}
+              onChange={(e) => setRealm(e.target.value)}
+              disabled={busy}
+              spellCheck={false}
+            />
+          )}
+          <p className="field-hint">
+            {realms.length > 0
+              ? "AD / LDAP / PAM 账号选各自的域，登录时会自动补全为"
+              : "未能读取认证域列表，可直接填写（常见值：pam、pve 或你的 AD 域）。登录用户名会自动补全为"}
+            <code style={{ margin: "0 3px" }}>
+              {username.trim() || "用户名"}@{realm || "域"}
+            </code>
+          </p>
+        </div>
 
         <div className="field">
           <label htmlFor="username">用户名</label>
@@ -182,6 +219,9 @@ export default function LoginPage() {
             autoComplete="username"
             spellCheck={false}
           />
+          <p className="field-hint">
+            只填用户名部分，认证域由上方下拉框决定
+          </p>
         </div>
 
         <div className="field">

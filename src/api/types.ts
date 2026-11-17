@@ -87,8 +87,21 @@ export interface Settings {
   spice_proxy_override: string | null;
   viewer_path: string | null;
   spice_kiosk: boolean;
+  spice_fullscreen: boolean;
+  spice_usb_redirect: boolean;
   last_fingerprint: string | null;
   server_version: string | null;
+}
+
+/** SPICE 会话的状态栏数据（来自 Rust 侧 spice_status 命令） */
+export interface SpiceStatus {
+  console_id: string;
+  vmid: number;
+  guest_name: string;
+  node: string;
+  protocol: string;
+  usb_redirect: boolean;
+  fullscreen: boolean;
 }
 
 /** Rust 侧 AppError 的序列化形式 */

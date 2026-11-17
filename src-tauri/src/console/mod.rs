@@ -13,12 +13,70 @@ use crate::pve::PveClient;
 pub mod spice;
 pub mod vnc;
 
-/// 一条已打开的控制台
+/// SPICE 会话的启动选项，由设置页决定。
+#[derive(Debug, Clone, Copy)]
+pub struct SpiceOptions {
+    /// kiosk 全屏托管（退出即结束会话）
+    pub kiosk: bool,
+    /// 普通全屏（可用热键切回窗口）
+    pub fullscreen: bool,
+    /// 是否允许把本地 USB 设备透传给虚拟机
+    pub usb_redirect: bool,
+}
+
+impl Default for SpiceOptions {
+    fn default() -> Self {
+        Self {
+            kiosk: false,
+            fullscreen: false,
+            usb_redirect: true,
+        }
+    }
+}
+
+impl SpiceOptions {
+    /// 把开关写进 .vv：remote-viewer 只在配置里看到这些键时才改变行为。
+    fn apply_to(&self, vv: &str) -> String {
+        let mut extra = String::new();
+        extra.push_str(&format!(
+            "fullscreen={}\n",
+            if self.fullscreen || self.kiosk { 1 } else { 0 }
+        ));
+        extra.push_str(&format!(
+            "enable-usbredir={}\n",
+            if self.usb_redirect { 1 } else { 0 }
+        ));
+        format!("{vv}{extra}")
+    }
+}
+
 ///
 /// 只保留回收资源所必需的句柄：SPICE 需要子进程，VNC 需要注销中转路由。
 enum ActiveConsole {
-    Spice { child: Child },
+    Spice {
+        child: Child,
+        /// 状态栏展示所需的会话信息（进程存活、USB/全屏开关都在这里）
+        /// 用 Box 避免与 Vnc 变体体积差异过大
+        status: Box<SpiceStatus>,
+    },
     Vnc { nonce: String },
+}
+
+/// SPICE 会话的状态栏信息。
+///
+/// SPICE 画面由外部 remote-viewer 进程绘制，我们无法往它的窗口里注入 UI，
+/// 因此状态栏由客户端自己的悬浮窗口呈现，数据从这里取。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpiceStatus {
+    pub console_id: String,
+    pub vmid: u32,
+    pub guest_name: String,
+    pub node: String,
+    /// 实际使用的协议标签，如 SPICE
+    pub protocol: String,
+    /// 由 .vv 下发的开关，用于如实反映当前会话能力
+    pub usb_redirect: bool,
+    pub fullscreen: bool,
 }
 
 #[derive(Default)]
@@ -56,7 +114,7 @@ impl ConsoleManager {
         guest: &Guest,
         forced: Option<Protocol>,
         proxy_override: Option<&str>,
-        kiosk: bool,
+        options: SpiceOptions,
         viewer_override: Option<&PathBuf>,
     ) -> AppResult<ConsoleHandle> {
         if !guest.is_running() {
@@ -144,8 +202,9 @@ impl ConsoleManager {
             }
         }
 
-        let vv = spice_cfg.to_vv();
-        let mut child = match spice::launch(&viewer, &vv, kiosk).await {
+        let vv = options.apply_to(&spice_cfg.to_vv());
+        let mut child = match spice::launch(&viewer, &vv, options.kiosk, options.fullscreen).await
+        {
             Ok(c) => c,
             Err(e) => {
                 let reason = format!("启动外部查看器失败，已降级为网页控制台：{e}");
@@ -164,11 +223,20 @@ impl ConsoleManager {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        let status = SpiceStatus {
+            console_id: id.clone(),
+            vmid: guest.vmid,
+            guest_name: guest.name.clone(),
+            node: guest.node.clone(),
+            protocol: "SPICE".to_string(),
+            usb_redirect: options.usb_redirect,
+            fullscreen: options.kiosk || options.fullscreen,
+        };
         self.registry
             .lock()
             .await
             .consoles
-            .insert(id.clone(), ActiveConsole::Spice { child });
+            .insert(id.clone(), ActiveConsole::Spice { child, status: Box::new(status) });
 
         Ok(ConsoleHandle::Spice {
             id,
@@ -267,6 +335,25 @@ impl ConsoleManager {
             },
             _ => None,
         }
+    }
+
+    /// 当前 SPICE 会话的状态栏数据（供悬浮状态栏展示）。
+    ///
+    /// 同时返回查看器是否还活着：若用户直接关掉了 remote-viewer 窗口，
+    /// 状态栏要能反映出来，而不是一直显示「已连接」。
+    pub async fn spice_status(&self) -> Option<SpiceStatus> {
+        let mut guard = self.registry.lock().await;
+        for entry in guard.consoles.values_mut() {
+            if let ActiveConsole::Spice { child, status } = entry {
+                // try_wait 顺带回收已退出的子进程，避免僵尸
+                let running = matches!(child.try_wait(), Ok(None));
+                if !running {
+                    return None;
+                }
+                return Some((**status).clone());
+            }
+        }
+        None
     }
 
     /// 应用退出前清理所有控制台，避免 PVE 侧 dtach/vncterm 与本地子进程堆积。

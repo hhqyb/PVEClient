@@ -130,10 +130,43 @@ export default function SettingsPage() {
             <input
               type="checkbox"
               checked={draft.spice_kiosk}
-              onChange={(e) => patch({ spice_kiosk: e.target.checked })}
+              onChange={(e) =>
+                patch({
+                  spice_kiosk: e.target.checked,
+                  // kiosk 与普通全屏互斥，避免两处同时为真
+                  spice_fullscreen: e.target.checked ? false : draft.spice_fullscreen,
+                })
+              }
             />
             SPICE 以全屏托管（kiosk）模式打开
           </label>
+
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={draft.spice_fullscreen}
+              onChange={(e) =>
+                patch({
+                  spice_fullscreen: e.target.checked,
+                  spice_kiosk: e.target.checked ? false : draft.spice_kiosk,
+                })
+              }
+            />
+            SPICE 以全屏打开（可用热键切回窗口）
+          </label>
+
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={draft.spice_usb_redirect}
+              onChange={(e) => patch({ spice_usb_redirect: e.target.checked })}
+            />
+            允许 USB 透传（把本地 USB 设备接到虚拟机）
+          </label>
+          <p className="settings-note">
+            关闭后 remote-viewer 仍会打开，但不会转发 U 盘、加密狗等本地 USB 设备。
+            该开关在重开会话后生效。
+          </p>
 
           <div className="field">
             <label htmlFor="proxy">SPICE 代理覆盖（可选）</label>

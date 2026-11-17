@@ -26,6 +26,10 @@ pub struct Settings {
     pub viewer_path: Option<PathBuf>,
     /// SPICE 全屏托管（kiosk）
     pub spice_kiosk: bool,
+    /// SPICE 以全屏（非 kiosk）打开；与 spice_kiosk 都为 false 时以普通窗口打开
+    pub spice_fullscreen: bool,
+    /// SPICE 启用 USB 重定向（透传本地 USB 设备到虚拟机）
+    pub spice_usb_redirect: bool,
     /// 上次见过的服务器证书指纹，用于变化告警
     pub last_fingerprint: Option<String>,
     /// 已知服务器版本，便于离线展示
@@ -44,6 +48,8 @@ impl Default for Settings {
             spice_proxy_override: None,
             viewer_path: None,
             spice_kiosk: true,
+            spice_fullscreen: false,
+            spice_usb_redirect: true,
             last_fingerprint: None,
             server_version: None,
         }
